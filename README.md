@@ -40,7 +40,7 @@ optional arguments:
 
 ## Results
 There are some difference between this implementation and official implementation, the model (`ResNet50`) is trained on 
-one NVIDIA RTX 3090(24G) GPU:
+one NVIDIA GeForce RTX 3090(24G) GPU:
 1. No `Gaussian blur` used;
 2. `Adam` optimizer with learning rate `1e-3` is used to replace `LARS` optimizer;
 3. No `Linear learning rate scaling` used;
