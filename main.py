@@ -1,6 +1,8 @@
 import argparse
 import os
 
+from torch._C import device
+os.environ['CUDA_VISIBLE_DEVICES']= '6'
 import pandas as pd
 import torch
 import torch.optim as optim
@@ -11,20 +13,20 @@ from tqdm import tqdm
 import utils
 from model import Model
 
-
+# torch.cuda.set_device(6)
 # train for one epoch to learn unique features
-def train(net, data_loader, train_optimizer):
+def train(net, data_loader, train_optimizer,device):
     net.train()
     total_loss, total_num, train_bar = 0.0, 0, tqdm(data_loader)
     for pos_1, pos_2, target in train_bar:
-        pos_1, pos_2 = pos_1.cuda(non_blocking=True), pos_2.cuda(non_blocking=True)
+        pos_1, pos_2 = pos_1.cuda(non_blocking=True,device=device), pos_2.cuda(non_blocking=True,device=device)
         feature_1, out_1 = net(pos_1)
         feature_2, out_2 = net(pos_2)
         # [2*B, D]
         out = torch.cat([out_1, out_2], dim=0)
         # [2*B, 2*B]
         sim_matrix = torch.exp(torch.mm(out, out.t().contiguous()) / temperature)
-        mask = (torch.ones_like(sim_matrix) - torch.eye(2 * batch_size, device=sim_matrix.device)).bool()
+        mask = (torch.ones_like(sim_matrix) - torch.eye(2 * batch_size, device=device)).bool()
         # [2*B, 2*B-1]
         sim_matrix = sim_matrix.masked_select(mask).view(2 * batch_size, -1)
 
@@ -45,22 +47,22 @@ def train(net, data_loader, train_optimizer):
 
 
 # test for one epoch, use weighted knn to find the most similar images' label to assign the test image
-def test(net, memory_data_loader, test_data_loader):
+def test(net, memory_data_loader, test_data_loader,device):
     net.eval()
     total_top1, total_top5, total_num, feature_bank = 0.0, 0.0, 0, []
     with torch.no_grad():
         # generate feature bank
         for data, _, target in tqdm(memory_data_loader, desc='Feature extracting'):
-            feature, out = net(data.cuda(non_blocking=True))
+            feature, out = net(data.cuda(non_blocking=True,device=device))
             feature_bank.append(feature)
         # [D, N]
         feature_bank = torch.cat(feature_bank, dim=0).t().contiguous()
         # [N]
-        feature_labels = torch.tensor(memory_data_loader.dataset.targets, device=feature_bank.device)
+        feature_labels = torch.tensor(memory_data_loader.dataset.targets, device=device)
         # loop test data to predict the label by weighted knn search
         test_bar = tqdm(test_data_loader)
         for data, _, target in test_bar:
-            data, target = data.cuda(non_blocking=True), target.cuda(non_blocking=True)
+            data, target = data.cuda(non_blocking=True,device=device), target.cuda(non_blocking=True,device=device)
             feature, out = net(data)
 
             total_num += data.size(0)
@@ -73,7 +75,7 @@ def test(net, memory_data_loader, test_data_loader):
             sim_weight = (sim_weight / temperature).exp()
 
             # counts for each class
-            one_hot_label = torch.zeros(data.size(0) * k, c, device=sim_labels.device)
+            one_hot_label = torch.zeros(data.size(0) * k, c, device=device)
             # [B*K, C]
             one_hot_label = one_hot_label.scatter(dim=-1, index=sim_labels.view(-1, 1), value=1.0)
             # weighted score ---> [B, C]
@@ -93,32 +95,31 @@ if __name__ == '__main__':
     parser.add_argument('--feature_dim', default=128, type=int, help='Feature dim for latent vector')
     parser.add_argument('--temperature', default=0.5, type=float, help='Temperature used in softmax')
     parser.add_argument('--k', default=200, type=int, help='Top k most similar images used to predict the label')
-    parser.add_argument('--batch_size', default=512, type=int, help='Number of images in each mini-batch')
+    parser.add_argument('--batch_size', default=256, type=int, help='Number of images in each mini-batch')
     parser.add_argument('--epochs', default=500, type=int, help='Number of sweeps over the dataset to train')
-
+    parser.add_argument('--gpu', default='cuda:6', type=str, help='Index of available GPU')
     # args parse
     args = parser.parse_args()
     feature_dim, temperature, k = args.feature_dim, args.temperature, args.k
     batch_size, epochs = args.batch_size, args.epochs
-
+    gpu = args.gpu
     # data prepare
     train_data = utils.CIFAR10Pair(root='data', train=True, transform=utils.train_transform, download=True)
-    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=True,
+    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True,
                               drop_last=True)
     memory_data = utils.CIFAR10Pair(root='data', train=True, transform=utils.test_transform, download=True)
-    memory_loader = DataLoader(memory_data, batch_size=batch_size, shuffle=False, num_workers=8, pin_memory=True)
+    memory_loader = DataLoader(memory_data, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
     test_data = utils.CIFAR10Pair(root='data', train=False, transform=utils.test_transform, download=True)
-    test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False, num_workers=8, pin_memory=True)
+    test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
+    print('-------------using:'+gpu+'--------------')
     # model setup and optimizer config
-    model = Model(feature_dim).cuda()
-    print(model)
-    flops, params = profile(model, inputs=(torch.randn(1, 3, 32, 32).cuda(),))
+    model = Model(feature_dim).cuda(gpu)
+    flops, params = profile(model, inputs=(torch.randn(1, 3, 32, 32).cuda(gpu),))
     flops, params = clever_format([flops, params])
     print('# Model Params: {} FLOPs: {}'.format(params, flops))
     optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-6)
     c = len(memory_data.classes)
-    print(c)
     # training loop
     results = {'train_loss': [], 'test_acc@1': [], 'test_acc@5': []}
     save_name_pre = '{}_{}_{}_{}_{}'.format(feature_dim, temperature, k, batch_size, epochs)
@@ -126,9 +127,9 @@ if __name__ == '__main__':
         os.mkdir('results')
     best_acc = 0.0
     for epoch in range(1, epochs + 1):
-        train_loss = train(model, train_loader, optimizer)
+        train_loss = train(model, train_loader, optimizer,gpu)
         results['train_loss'].append(train_loss)
-        test_acc_1, test_acc_5 = test(model, memory_loader, test_loader)
+        test_acc_1, test_acc_5 = test(model, memory_loader, test_loader,gpu)
         results['test_acc@1'].append(test_acc_1)
         results['test_acc@5'].append(test_acc_5)
         # save statistics

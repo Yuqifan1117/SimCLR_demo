@@ -1,3 +1,6 @@
+import os
+os.environ['CUDA_VISIBLE_DEVICE']= '6'
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,6 +12,7 @@ class Model(nn.Module):
         super(Model, self).__init__()
 
         self.f = []
+
         for name, module in resnet50().named_children():
             if name == 'conv1':
                 module = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)

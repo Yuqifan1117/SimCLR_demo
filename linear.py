@@ -1,5 +1,6 @@
 import argparse
-
+import os
+os.environ['CUDA_VISIBLE_DEVICES']= '6'
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -8,11 +9,11 @@ from thop import profile, clever_format
 from torch.utils.data import DataLoader
 from torchvision.datasets import CIFAR10
 from tqdm import tqdm
-
+from torch.cuda.amp import autocast as autocast, GradScaler
 import utils
 from model import Model
 
-
+# torch.cuda.set_device(6)
 class Net(nn.Module):
     def __init__(self, num_class, pretrained_path):
         super(Net, self).__init__()
@@ -21,6 +22,7 @@ class Net(nn.Module):
         self.f = Model().f
         # classifier
         self.fc = nn.Linear(2048, num_class, bias=True)
+        # load pre-training model and fine-tune
         self.load_state_dict(torch.load(pretrained_path, map_location='cpu'), strict=False)
 
     def forward(self, x):
@@ -34,18 +36,20 @@ class Net(nn.Module):
 def train_val(net, data_loader, train_optimizer):
     is_train = train_optimizer is not None
     net.train() if is_train else net.eval()
-
+    scaler = GradScaler()
     total_loss, total_correct_1, total_correct_5, total_num, data_bar = 0.0, 0.0, 0.0, 0, tqdm(data_loader)
     with (torch.enable_grad() if is_train else torch.no_grad()):
         for data, target in data_bar:
             data, target = data.cuda(non_blocking=True), target.cuda(non_blocking=True)
-            out = net(data)
-            loss = loss_criterion(out, target)
+            with autocast():
+                out = net(data)
+                loss = loss_criterion(out, target)
 
             if is_train:
                 train_optimizer.zero_grad()
-                loss.backward()
-                train_optimizer.step()
+                scaler.scale(loss).backward()
+                scaler.step(train_optimizer)
+                scaler.update()
 
             total_num += data.size(0)
             total_loss += loss.item() * data.size(0)
@@ -62,10 +66,10 @@ def train_val(net, data_loader, train_optimizer):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Linear Evaluation')
-    parser.add_argument('--model_path', type=str, default='results/128_0.5_200_512_500_model.pth',
+    parser.add_argument('--model_path', type=str, default='results/128_0.5_200_256_500_model.pkl',
                         help='The pretrained model path')
-    parser.add_argument('--batch_size', type=int, default=512, help='Number of images in each mini-batch')
-    parser.add_argument('--epochs', type=int, default=100, help='Number of sweeps over the dataset to train')
+    parser.add_argument('--batch_size', type=int, default=256, help='Number of images in each mini-batch')
+    parser.add_argument('--epochs', type=int, default=200, help='Number of sweeps over the dataset to train')
 
     args = parser.parse_args()
     model_path, batch_size, epochs = args.model_path, args.batch_size, args.epochs
@@ -87,6 +91,7 @@ if __name__ == '__main__':
                'test_loss': [], 'test_acc@1': [], 'test_acc@5': []}
 
     best_acc = 0.0
+    # fine-tune to linear classification
     for epoch in range(1, epochs + 1):
         train_loss, train_acc_1, train_acc_5 = train_val(model, train_loader, optimizer)
         results['train_loss'].append(train_loss)
